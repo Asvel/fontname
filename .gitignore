@@ -1,0 +1,12 @@
+
+# Python
+__pycache__
+*.py[cod]
+/*.egg-info
+
+# IntelliJ IDEA
+/.idea/
+/*.iml
+
+# OS X
+.DS_Store
