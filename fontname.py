@@ -119,22 +119,22 @@ def guess_sfnt_name(face, autochoose=True):
         try:
             s = name.string.decode(encoding)
             if "\x00" in s.strip("\x00"):
-                raise UnicodeDecodeError()
-        except UnicodeDecodeError:
+                raise UnicodeError()
+        except UnicodeError:
             try:
                 if re.match(br'^\x00[\x00-\xFF]*$', name.string):
                     s = name.string.replace(b'\x00', b'').decode(encoding)
                 else:
-                    raise UnicodeDecodeError()
-            except UnicodeDecodeError:
+                    raise UnicodeError()
+            except UnicodeError:
                 try:
                     encoding = 'utf_16_be'
                     s = name.string.decode(encoding)
-                except UnicodeDecodeError:
+                except UnicodeError:
                     try:
                         encoding = 'ascii'
                         s = name.string.decode(encoding)
-                    except UnicodeDecodeError:
+                    except UnicodeError:
                         encoding = None
                         s = ""
         name.encoding = encoding
