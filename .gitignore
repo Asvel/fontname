@@ -10,3 +10,6 @@ __pycache__
 
 # OS X
 .DS_Store
+
+# Test data
+/tests/fonts
