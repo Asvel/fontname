@@ -1,13 +1,18 @@
 # -*- coding: utf-8 -*-
 
-import re
+from __future__ import division, absolute_import, print_function, unicode_literals
+
 import logging
+import re
 
 import freetype
 
-# SFNT 名称表中平台 ID 和语言 ID 可能对应的编码方式
-# sfnt_info_encoding[name.platform_id][name.encoding_id]
-sfnt_info_encoding = {
+logger = logging.getLogger(__name__)
+
+
+# Preferred(most possible) encoding of SFNT name
+# [name.platform_id][name.encoding_id]
+sfnt_name_encoding = {
     0: {
         0: 'utf_16_be',
         1: 'utf_16_be',
@@ -77,120 +82,143 @@ sfnt_info_encoding = {
     },
 }
 
-# 不同SFNT信息选择的优先级
-# (language_id, name.platform_id, name.encoding_id)
-sfnt_info_priority = [
+# Default priority of SFNT names
+# (language_id, platform_id, encoding_id)
+sfnt_name_priority = [
+    # zh-Hans
     (2052, 3, 3),
     (2052, 3, 1),
     (33, 1, 25),
+    # zh-Hant
     (1028, 3, 4),
     (1028, 3, 1),
     (19, 1, 2),
+    # jp
     (1041, 3, 2),
     (1041, 3, 1),
     (11, 1, 1),
+    # kr
     (1042, 3, 5),
     (1042, 3, 1),
     (2066, 3, 6),
     (2066, 3, 1),
     (23, 1, 3),
+    # en-US
     (1033, 3, 1),
 ]
 
 
-def guess_sfnt_name(face, autochoose=True):
-    """猜测带有 SFNT 名称表的字体的字体名称
+def guess_sfnt_name(face, priority=sfnt_name_priority):
+    """Guess name from SFNT of a font face
 
-    face 字体
-    autochoose 自动从结果集里选择一个结果，根据 sfnt_info_priority
-    返回值 当 autochoose 为 False 时返回字体名称集，否则返回一个字体名称
+    `priority` is a list of tuples, each tuple contains three item
+    (language_id, platform_id, encoding_id), the first matched SFNT
+    name will be returned. If `priority` is `None` or `False`, all
+    SFNT name objects will be returned.
     """
 
-    # 获取原始字体名称
+    # Get raw SFNT names
     names = [face.get_sfnt_name(i) for i in range(face.sfnt_name_count)]
-    names = [x for x in names if x.name_id == 4]
+    names = [name for name in names if name.name_id == 4]  # 4 = FULL_NAME
+    if not names:
+        logger.warning("Can't find a FULL_NAME item in SFNT table")
+        return ""
 
-    # 猜测字体名称的编码并尝试解码
+    # Try to decode them
     for name in names:
-        try:
-            encoding = sfnt_info_encoding[name.platform_id][name.encoding_id]
-        except KeyError:
-            encoding = 'utf_16_be'
-        try:
-            s = name.string.decode(encoding)
+        raw = name.string
+        logger.debug("Process SFNT name (%d, %d, %d) %s",
+                     name.language_id, name.platform_id, name.encoding_id, raw)
+        try:  # SFNT info preferred encoding
+            try:
+                encoding = sfnt_name_encoding[name.platform_id][name.encoding_id]
+            except KeyError:
+                encoding = 'utf_16_be'
+            logger.debug("Try encoding %s", encoding)
+            s = raw.decode(encoding)
             if "\x00" in s.strip("\x00"):
                 raise UnicodeError()
         except UnicodeError:
-            try:
-                if re.match(br'^\x00[\x00-\xFF]*$', name.string):
-                    s = name.string.replace(b'\x00', b'').decode(encoding)
+            try:  # SFNT info preferred encoding with padding \x00
+                if re.match(br'^\x00[\x00-\xFF]*$', raw):
+                    logger.debug("Try encoding %s after remove padding \\x00", encoding)
+                    s = raw.replace(b'\x00', b'').decode(encoding)
                 else:
                     raise UnicodeError()
             except UnicodeError:
-                try:
+                try:  # UTF-16 BE
                     encoding = 'utf_16_be'
-                    s = name.string.decode(encoding)
+                    logger.debug("Try encoding %s", encoding)
+                    s = raw.decode(encoding)
                 except UnicodeError:
-                    try:
+                    try:  # ASCII
                         encoding = 'ascii'
-                        s = name.string.decode(encoding)
-                    except UnicodeError:
+                        logger.debug("Try encoding %s", encoding)
+                        s = raw.decode(encoding)
+                    except UnicodeError:  # failed
                         encoding = None
                         s = ""
         name.encoding = encoding
         name.unicode = s.strip("\x00")
-        if name.unicode == "":
-            logging.warning("\t无法解码字体名称".format(name.string))
-        logging.debug("\t{0.platform_id} {0.encoding_id:>2} {0.language_id:>4}"
-                      " {0.encoding:<10} {0.unicode:<80} {0.string}".format(name))
-
-    # (猜测合适的字体名称并)返回字体名称
-    if autochoose:
-        namedict = {(x.language_id, x.platform_id, x.encoding_id): x.unicode for x in names}
-        for info in sfnt_info_priority:
-            if info in namedict:
-                return namedict[info]
-        if len(names) > 0:
-            return names[-1].unicode
+        if name.unicode:
+            logger.debug("Success decoded to '%s'", name.unicode)
         else:
-            logging.warning("没有从SFNT表中取得字体名称")
-            return ""
+            logger.warning("Failed to decode %s".format(name.string))
+
+    # Choose a prefered name if need
+    if priority not in (None, False):
+        namedict = {(n.language_id, n.platform_id, n.encoding_id): n.unicode for n in names}
+        for meta in priority:
+            name = namedict.get(meta)
+            if name:
+                logger.debug("Choose preferred name '%s' with meta %s", name, meta)
+                break
+        else:
+            name = names[-1].unicode
+            logger.warning("Can't find any preferred name, choose '%s'", name)
+        return name
     else:
-        return {x.unicode for x in names}
+        return names
 
 
-def guess_names(fontfilename):
-    """猜测字体文件中所有字体的首选名称
+def guess_font_name(filename, join=" & "):
+    """Guess name of a font file
 
-    fontfilename 字体文件路径
-    返回 返回猜测得到的字体名称列表
+    A font file may have multiple faces, name of each face will be
+    guessed and joined by the argument `join`, unless `join` is `None`
+    or `False`, in this case a list of names will be returned.
     """
+    logger.debug("File %s", filename)
+
+    faces = [freetype.Face(filename)]
+    faces.extend(freetype.Face(filename, i) for i in range(1, faces[0].num_faces))
+    logger.debug("Found %d faces", len(faces))
+
     names = []
-    try:
-        faces = [freetype.Face(fontfilename)]
-        faces += [freetype.Face(fontfilename, i) for i in range(1, faces[0].num_faces)]
-    except freetype.ft_errors.FT_Exception as e:
-        faces = []
-        logging.error("无法载入文件 {} - {}".format(fontfilename, e))
-    for face in faces:
+    for index, face in enumerate(faces):
+        logger.debug("Process Face %d", index)
         name = ""
         if face.sfnt_name_count > 0:
-            name = guess_sfnt_name(face, True)
-        if name == "":
+            logger.debug("Try guess SFNT name")
+            name = guess_sfnt_name(face)
+        if not name:
             try:
+                logger.debug("Try use family name")
                 name = face.family_name.decode('ascii')
             except UnicodeDecodeError:
-                name = ""
-        if name == "":
-            try:
-                name = face.postscript_name.decode('ascii')
-            except UnicodeDecodeError:
-                name = ""
-        if name != "":
+                try:
+                    logger.debug("Try use PostScript name")
+                    name = face.postscript_name.decode('ascii')
+                except UnicodeDecodeError:
+                    pass
+        if name:
+            logger.debug("Got name %s", name)
             if name not in names:
                 names.append(name)
         else:
-            logging.error("无法获取字体文件 {} 中某一字体的名称".format(
-                fontfilename))
-        logging.debug("\t\t{}".format(name))
+            logger.error("Can't get name of face %d in file %s", index, filename)
+
+    logger.debug("Got font names %s", names)
+    if join not in (None, False):
+        names = join.join(names)
     return names
