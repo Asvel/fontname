@@ -1,226 +1,161 @@
-# -*- coding: utf-8 -*-
+"""Read and decode quirk encoded name records from OpenType fonts."""
 
-from __future__ import division, absolute_import, print_function, unicode_literals
+import os
+from enum import Enum
+from fontTools import ttLib
 
-import logging
-import re
-
-import freetype
-
-__version__ = '0.2.0'
-
-logger = logging.getLogger(__name__)
+__version__ = '1.0.0'
 
 
-# Preferred(most possible) encoding of SFNT name
-# [name.platform_id][name.encoding_id]
-sfnt_name_encoding = {
-    0: {
-        0: 'utf_16_be',
-        1: 'utf_16_be',
-        2: 'utf_16_be',
-        3: 'utf_16_be',
-        4: 'utf_16_be',
-        5: 'utf_16_be',
-    },
-    1: {
-        0: 'mac_roman',
-        1: 'shift_jis',
-        2: 'big5',
-        3: 'euc_kr',
-        4: 'iso8859_6',
-        5: 'iso8859_8',
-        6: 'mac_greek',
-        7: 'iso8859_5',
-        8: 'ascii',
-        9: 'ascii',
-        10: 'ascii',
-        11: 'ascii',
-        12: 'ascii',
-        13: 'ascii',
-        14: 'ascii',
-        15: 'ascii',
-        16: 'ascii',
-        17: 'ascii',
-        18: 'ascii',
-        19: 'ascii',
-        20: 'ascii',
-        21: 'cp874',
-        22: 'ascii',
-        23: 'ascii',
-        24: 'ascii',
-        25: 'euc_cn',
-        26: 'ascii',
-        27: 'ascii',
-        28: 'ascii',
-        29: 'ascii',
-        30: 'cp1258',
-        31: 'ascii',
-        32: 'ascii',
-    },
-    2: {
-        0: 'ascii',
-        1: 'utf_16_be',
-        2: 'latin_1',
-    },
-    3: {
-        0: 'utf_16_be',
-        1: 'utf_16_be',
-        2: 'shift_jis',
-        3: 'gb2312',
-        4: 'big5',
-        5: 'cp949',
-        6: 'johab',
-        10: 'utf_32_be',
-    },
-    4: {
-        0: 'ascii',
-    },
-    7: {
-        0: 'utf_16_be',
-        1: 'utf_16_be',
-        2: 'utf_16_be',
-        3: 'utf_16_be',
-    },
-}
+class IssueLevel(Enum):
+    NONE = 0  # everything is ok
+    MARK = 1  # encoding mark does not match string data
+    DATA = 2  # string data has some problems, it cannot decode with any OpenType supported encoding
 
-# Default priority of SFNT names
-# (language_id, platform_id, encoding_id)
-sfnt_name_priority = [
-    # zh-Hans
-    (2052, 3, 3),
-    (2052, 3, 1),
-    (33, 1, 25),
-    # zh-Hant
-    (1028, 3, 4),
-    (1028, 3, 1),
-    (19, 1, 2),
-    # jp
-    (1041, 3, 2),
-    (1041, 3, 1),
-    (11, 1, 1),
-    # kr
-    (1042, 3, 5),
-    (1042, 3, 1),
-    (2066, 3, 6),
-    (2066, 3, 1),
-    (23, 1, 3),
-    # en-US
-    (1033, 3, 1),
+
+def decode_name(name_record):
+    """Decode a fonttools NameRecord, return (decoded string, issue level, actual encoding if no data issue)"""
+    raw = name_record.string
+    encoding = name_record.getEncoding()
+
+    # some names are truncated and data is permanently lost, we can only recover the remaining part (eg: 文鼎勘亭流)
+    def decode(encoding_):
+        try:
+            return raw.decode(encoding_), IssueLevel.NONE if encoding_ == encoding else IssueLevel.MARK, encoding_
+        except UnicodeDecodeError as ex:
+            if ex.start >= len(raw) - 2:
+                return raw.decode(encoding_, 'ignore'), IssueLevel.DATA, None
+            else:
+                raise ex
+
+    # no such case, but if encountered things will break
+    if encoding is None:
+        return decode('utf_16_be')
+
+    # empty is empty
+    if len(raw) == 0:
+        return decode(encoding)
+
+    # among all OpenType supported encoding, only <utf_16_be> may contains '\x00' inside
+    # if a '\x00' found, it might..
+    if encoding != 'utf_16_be' and b'\x00' in raw.rstrip(b'\x00'):
+        # ..prepend a redundant 0x00 before every encoded bytes (eg: 微软简中圆)
+        if encoding != 'utf_16_be' and all(b == 0 for b in raw[0::2]):
+            try:
+                return raw[1::2].decode(encoding), IssueLevel.DATA, None
+            except UnicodeDecodeError: pass
+        # ..or mistakenly mark <utf_16_be> as other encoding (eg: HG半古印体)
+        else:
+            try:
+                return decode('utf_16_be')
+            except UnicodeDecodeError: pass
+
+    # mistakenly mark <shift_jis>/<big5> as <mac_roman>
+    # <mac_roman> won't fail on any input, so we must catch this first
+    if encoding == 'mac_roman' and len([b for b in raw if b > 0x7f]) > 3:
+        # try big5 fisrt as it more likely to fail
+        try:
+            return decode('x_mac_trad_chinese_ttx')  # (eg: 華康布丁體(P))
+        except UnicodeDecodeError: pass
+        try:
+            return decode('x_mac_japanese_ttx')  # (eg: EPSON 丸ゴシック体Ｍ)
+        except UnicodeDecodeError: pass
+
+    # 「恅隋怪，爬——」, the infamous "恅隋xxxx" series (eg: 文鼎粗圆简 = 恅隋棉埴潠翷)
+    # they decode some "original" strings with incorrect encoding and re-encode to <utf_16_be>
+    # and in some cases, there would be a redundant character at the end
+    if encoding == 'utf_16_be' and raw.startswith(b'\x60\x45\x96\x8b'):
+        try:
+            decoded = raw.decode('utf_16_be').encode('big5').decode('gb2312', 'replace')
+            return decoded[:-2] if decoded[-2] == '�' else decoded, IssueLevel.DATA, None
+        except UnicodeError: pass
+
+    # mistakenly mark some other encodings as <utf_16_be>
+    # it's hard to tell a encoding from <utf_16_be> accurately, we have to match verdor prefixes individually
+    if encoding == 'utf_16_be':
+        if raw.startswith(b'\xbb\xaa\xbf\xb5'):  # (eg: 华康楷体W5-A)
+            try:
+                return decode('gb2312')
+            except UnicodeDecodeError: pass
+        if raw.startswith(b'\xb5\xd8\xb1\x64'):  # (eg: 華康中黑體(P)-UN)
+            try:
+                return decode('big5')
+            except UnicodeDecodeError: pass
+        if raw.startswith(b'HanDing'):  # (eg: 汉鼎简中楷)
+            try:
+                return decode('ascii')
+            except UnicodeDecodeError: pass
+
+    # mistakenly mark <x_mac_simp_chinese_ttx> as <x_mac_japanese_ttx> (eg: 森泽UD新黑 Gb4 DB)
+    # these two encodings are also hard to distinguish
+    if encoding == 'x_mac_japanese_ttx' and raw.startswith(b'\xc9\xad\xd4\xf3'):
+        try:
+            return decode('x_mac_simp_chinese_ttx')
+        except UnicodeDecodeError: pass
+
+    # mistakenly mark <utf_16_be> as some other encodings  (eg: 麗流隷書)
+    # usually this fails on decoding with marked encoding, but in rarely case it won't
+    # non-unicode encoding only supports a small set of characters, and use very different code points from unicode
+    # if the actual encoding is not <utf_16_be>, decoding with it is unlikely to produce a marked encoding encodable content
+    # skip truncation detection for mininal false positives
+    if encoding != 'utf_16_be' and len(raw) % 2 == 0:
+        try:
+            decoded = raw.decode('utf_16_be')
+            decoded.encode(encoding)
+            return decoded, IssueLevel.MARK, 'utf_16_be'
+        except UnicodeError: pass
+
+    # try fonttools' decoder
+    try:
+        decoded = name_record.toUnicode()
+        if decoded == raw.decode(encoding, 'replace'):
+            return decoded, IssueLevel.NONE, encoding
+        else:
+            return decoded, IssueLevel.DATA, None
+    except UnicodeDecodeError: pass
+
+    # mark as 'x_mac_simp_chinese_ttx', but use an extend edition actually (eg: 方正字迹-黄陵野鶴行書 繁U)
+    # note that this is a data issue in fact, <gbk> is not a OpenType supported encoding
+    if encoding == 'x_mac_simp_chinese_ttx':
+        try:
+            return raw.decode('gbk'), IssueLevel.DATA, None
+        except UnicodeDecodeError: pass
+
+    # try just recover from truncated data (eg: 文鼎勘亭流)
+    try:
+        return decode(encoding)
+    except UnicodeDecodeError: pass
+
+    # the last hope (eg: 蘇新詩卵石體簡)
+    return decode('utf_16_be')
+
+
+preferred_langs = [
+    2052, 33,  # zh-Hans
+    1028, 19,  # zh-Hant
+    1041, 11,  # jp
+    1042, 23,  # kr
+    1033, 0,   # en-US
 ]
 
 
-def guess_sfnt_name(face, priority=sfnt_name_priority):
-    """Guess name from SFNT of a font face
+def get_display_name(font, preferred_langs=preferred_langs):
+    names = {n.langID: n for n in font['name'].names if n.nameID == 4}
+    name = next(decode_name(names[lang])[0].strip('\x00') for lang in preferred_langs if lang in names)
+    return name
 
-    `priority` is a list of tuples, each tuple contains three item
-    (language_id, platform_id, encoding_id), the first matched SFNT
-    name will be returned. If `priority` is `None` or `False`, all
-    SFNT name objects will be returned.
-    """
 
-    # Get raw SFNT names
-    names = [face.get_sfnt_name(i) for i in range(face.sfnt_name_count)]
-    names = [name for name in names if name.name_id == 4]  # 4 = FULL_NAME
-    if not names:
-        logger.warning("Can't find a FULL_NAME item in SFNT table")
-        return ""
-
-    # Try to decode them
-    for name in names:
-        raw = name.string
-        logger.debug("Process SFNT name (%d, %d, %d) %s",
-                     name.language_id, name.platform_id, name.encoding_id, raw)
-        try:  # SFNT info preferred encoding
-            try:
-                encoding = sfnt_name_encoding[name.platform_id][name.encoding_id]
-            except KeyError:
-                encoding = 'utf_16_be'
-            logger.debug("Try encoding %s", encoding)
-            s = raw.decode(encoding)
-            if "\x00" in s.strip("\x00"):
-                raise UnicodeError()
-        except UnicodeError:
-            try:  # SFNT info preferred encoding with padding \x00
-                if re.match(br'^\x00[\x00-\xFF]*$', raw):
-                    logger.debug("Try encoding %s after remove padding \\x00", encoding)
-                    s = raw.replace(b'\x00', b'').decode(encoding)
-                else:
-                    raise UnicodeError()
-            except UnicodeError:
-                try:  # UTF-16 BE
-                    encoding = 'utf_16_be'
-                    logger.debug("Try encoding %s", encoding)
-                    s = raw.decode(encoding)
-                except UnicodeError:
-                    try:  # ASCII
-                        encoding = 'ascii'
-                        logger.debug("Try encoding %s", encoding)
-                        s = raw.decode(encoding)
-                    except UnicodeError:  # failed
-                        encoding = None
-                        s = ""
-        name.encoding = encoding
-        name.unicode = s.strip("\x00")
-        if name.unicode:
-            logger.debug("Success decoded to '%s'", name.unicode)
-        else:
-            logger.warning("Failed to decode %s".format(name.string))
-
-    # Choose a prefered name if need
-    if priority not in (None, False):
-        namedict = {(n.language_id, n.platform_id, n.encoding_id): n.unicode for n in names}
-        for meta in priority:
-            name = namedict.get(meta)
-            if name:
-                logger.debug("Choose preferred name '%s' with meta %s", name, meta)
-                break
-        else:
-            name = names[-1].unicode
-            logger.warning("Can't find any preferred name, choose '%s'", name)
-        return name
+def get_display_names(font_path, join=" & ", preferred_langs=preferred_langs):
+    ext = os.path.splitext(font_path)[1].lower()
+    if (ext == ".ttc" or ext == ".otc"):
+        tt = ttLib.TTCollection(font_path)
+        names = [get_display_name(font, preferred_langs) for font in tt.fonts]
     else:
-        return names
+        tt = ttLib.TTFont(font_path)
+        names = [get_display_name(tt, preferred_langs)]
+    tt.close()
 
-
-def guess_font_name(filename, join=" & "):
-    """Guess name of a font file
-
-    A font file may have multiple faces, name of each face will be
-    guessed and joined by the argument `join`, unless `join` is `None`
-    or `False`, in this case a list of names will be returned.
-    """
-    logger.debug("File %s", filename)
-
-    faces = [freetype.Face(filename)]
-    faces.extend(freetype.Face(filename, i) for i in range(1, faces[0].num_faces))
-    logger.debug("Found %d faces", len(faces))
-
-    names = []
-    for index, face in enumerate(faces):
-        logger.debug("Process Face %d", index)
-        name = ""
-        if face.sfnt_name_count > 0:
-            logger.debug("Try guess SFNT name")
-            name = guess_sfnt_name(face)
-        if not name:
-            try:
-                logger.debug("Try use family name")
-                name = face.family_name.decode('ascii')
-            except UnicodeDecodeError:
-                try:
-                    logger.debug("Try use PostScript name")
-                    name = face.postscript_name.decode('ascii')
-                except UnicodeDecodeError:
-                    pass
-        if name:
-            logger.debug("Got name %s", name)
-            if name not in names:
-                names.append(name)
-        else:
-            logger.error("Can't get name of face %d in file %s", index, filename)
-
-    logger.debug("Got font names %s", names)
-    if join not in (None, False):
-        names = join.join(names)
-    return names
+    if (join is not None):
+        return join.join(names)
+    else:
+        return(names)

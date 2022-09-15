@@ -1,0 +1,26 @@
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "fontname"
+authors = [{name = "Asvel", email = "fe.asvel@gmail.com"}]
+readme = "README.rst"
+requires-python = "~=3.7"
+license = {file = "LICENSE.txt"}
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: Fonts",
+]
+dependencies = [
+    "fonttools >=4",
+]
+dynamic = ["version", "description"]
+
+[project.urls]
+Home = "https://github.com/Asvel/fontname"
