@@ -31,9 +31,9 @@ Usage examples
     ('森泽UD新黑 Gb4 B', <IssueLevel.MARK: 1>, 'x_mac_simp_chinese_ttx')
     >>> tt.close()
 
-    >>> tt = ttLib.TTFont("文鼎粗圆简.TTF")
+    >>> tt = ttLib.TTFont("恅隋棉埴潠翷.ttf")
     >>> fontname.decode_name(tt['name'].names[4])
-    ('文鼎粗圆简', <IssueLevel.DATA: 2>, None)
+    ('文鼎新艺体简', <IssueLevel.DATA: 2>, None)
     >>> tt.close()
 
 
